@@ -53,7 +53,10 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  base_multiple: 0.25,
+  // Calibrated on the snapshot itself, not picked: the 144 live-token protocols in this snapshot
+  // carry a median market-cap / TVL ratio of 0.1691, so a pre-token protocol's implied value starts
+  // from what the market actually pays for a dollar of TVL in the same universe.
+  base_multiple: 0.17,
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
@@ -64,7 +67,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-1';
+export const MODEL_VERSION = 'radar-2';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -221,12 +224,17 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: pre-token protocols below the watchlist floor, by TVL, capped. Never a replacement
-  // for a watchlist row: a chosen protocol stays chosen.
+  // The early radar: pre-token protocols below the watchlist floor, capped. They are picked by the
+  // model's own implied value, not by raw TVL: a smaller protocol that is growing fast and has had
+  // years to build is a stronger launch candidate than a larger one that is shrinking, and a radar
+  // that only sorted by size would never surface it. Never a replacement for a watchlist row: a
+  // chosen protocol stays chosen.
   const early = snapshot.protocols
     .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
-    .slice(0, EARLY_ROWS);
+    .map((p) => ({ p, implied: impliedValue(p, snapshot.as_of, model).implied }))
+    .sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0))
+    .slice(0, EARLY_ROWS)
+    .map((e) => e.p);
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
@@ -317,11 +325,18 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const action = actionFor(p, capital, chain);
+  const reach = p.chains.length > 1 ? ` It runs on ${p.chains.length} chains; farm it on ${chain}, where its record starts, and ignore the rest until the first position is counted.` : '';
+  const momentum = p.change_7d === null ? 'The snapshot reports no 7-day TVL change for it, so size the position at the low end until a trend is visible.' : p.change_7d >= 0 ? `Its TVL grew ${p.change_7d}% in the last 7 days of the snapshot: momentum is on your side, but do not chase it with a larger position than the plan states.` : `Its TVL fell ${Math.abs(p.change_7d)}% in the last 7 days of the snapshot: start with half the stated capital and add the rest only if the trend turns.`;
   return [
     {
-      text: `Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.`,
+      text: `Use a fresh wallet that holds only the funds you plan to farm ${p.name} with, and keep its seed phrase offline.${reach}`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
+    },
+    {
+      text: `Before depositing anything, open ${p.name}'s own documentation and check whether it runs a points or rewards programme and which actions it counts; if it counts none of the actions below, follow its list instead of this one.`,
+      cost: 'nothing to read, and never pay for access to a points page',
+      time: '15 minutes',
     },
     {
       text: action,
@@ -329,24 +344,19 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes to set up',
     },
     {
-      text: `Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.`,
+      text: `Make one qualifying action each week, rotating a deposit, a borrow, a swap and a vote where ${p.name} offers them, so the wallet reads as a real user and not a one-off visitor. ${momentum}`,
       cost: 'about $2 of gas a week',
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
+      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot, and re-check the position after any week in which TVL moves more than 20% either way.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
     {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
+      text: `Watch ${p.name}'s official announcements for a token, snapshot or claim date; when one is published, claim only from the link the protocol itself publishes, then write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
       cost: 'no fee to check, and never pay to claim',
       time: '10 minutes',
-    },
-    {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
-      cost: 'nothing but the log',
-      time: '5 minutes',
     },
   ];
 }
